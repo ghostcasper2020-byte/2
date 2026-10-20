@@ -1,0 +1,97 @@
+name: Build PersonalGPS v0.5 Quick Panel (experimental)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - name: Checkout your PersonalGPS build recipe
+        uses: actions/checkout@v4
+
+      - name: Print available Xcode version
+        run: xcodebuild -version
+
+      - name: Verify the PersonalGPS build recipe
+        run: python3 -m unittest discover -s standalone-v04/tests -v
+
+      - name: Fetch pinned standalone engine source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p upstream
+          git -C upstream init -q
+          git -C upstream remote add origin https://github.com/truongkma/t-location.git
+          git -C upstream fetch -q --depth 1 origin 5e57f815e5958f133dfbaae8252473054adeccf0
+          git -C upstream checkout -q --detach FETCH_HEAD
+          test "$(git -C upstream rev-parse HEAD)" = "5e57f815e5958f133dfbaae8252473054adeccf0"
+          test -f upstream/LICENSE
+          test -f upstream/TLocation.xcodeproj/project.pbxproj
+          test -f upstream/TLocation/idevice/libidevice_ffi.a || echo 'Note: idevice static library path differs; Xcode will validate linked components.'
+          echo "Upstream source pinned to $(git -C upstream rev-parse --short HEAD)"
+
+      - name: Apply PersonalGPS display name and separate bundle ID
+        run: python3 standalone-v04/rebrand.py upstream
+
+      - name: Validate Quick Panel patch
+        run: python3 -m unittest discover -s standalone-v05/tests -v
+
+      - name: Integrate Quick Panel into PersonalGPS UI
+        run: python3 standalone-v05/patch_quick_panel.py upstream
+
+      - name: Parse patched Swift source
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun swiftc -frontend -parse upstream/TLocation/Views/RootView.swift
+
+      - name: Build unsigned iPhone archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild clean archive \
+            -project upstream/TLocation.xcodeproj \
+            -scheme TLocation \
+            -configuration Debug \
+            -archivePath "$RUNNER_TEMP/PersonalGPSv05.xcarchive" \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY='' \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_OPTIMIZATION_LEVEL='-Onone' \
+            IPHONEOS_DEPLOYMENT_TARGET=17.4
+
+      - name: Package unsigned IPA and corresponding source
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/PersonalGPSv05.xcarchive/Products/Applications/TLocation.app"
+          test -d "$APP"
+          mkdir -p "$RUNNER_TEMP/personal-gps-payload/Payload"
+          ditto "$APP" "$RUNNER_TEMP/personal-gps-payload/Payload/PersonalGPS.app"
+          (cd "$RUNNER_TEMP/personal-gps-payload" && zip -qry "$GITHUB_WORKSPACE/PersonalGPS-v0.5-unsigned.ipa" Payload)
+          test -s PersonalGPS-v0.5-unsigned.ipa
+          mkdir -p "$RUNNER_TEMP/personal-gps-source"
+          rsync -a --exclude=.git upstream/ "$RUNNER_TEMP/personal-gps-source/TLocation/"
+          mkdir -p "$RUNNER_TEMP/personal-gps-source/PersonalGPS-build-recipe"
+          cp standalone-v04/rebrand.py standalone-v04/README.md standalone-v04/NOTICE.md "$RUNNER_TEMP/personal-gps-source/PersonalGPS-build-recipe/"
+          cp standalone-v05/patch_quick_panel.py standalone-v05/README.md "$RUNNER_TEMP/personal-gps-source/PersonalGPS-build-recipe/"
+          (cd "$RUNNER_TEMP/personal-gps-source" && zip -qry "$GITHUB_WORKSPACE/PersonalGPS-v0.5-corresponding-source.zip" .)
+          test -s PersonalGPS-v0.5-corresponding-source.zip
+
+      - name: Upload build and source artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PersonalGPS-v0.5-EXPERIMENTAL-unsigned-IPA-and-source
+          path: |
+            PersonalGPS-v0.5-unsigned.ipa
+            PersonalGPS-v0.5-corresponding-source.zip
+          if-no-files-found: error
+          retention-days: 14
