@@ -1,0 +1,11 @@
+# Pairing credentials must never be committed
+*.mobiledevicepairing
+*pairingFile.plist
+*pairing-file.plist
+*.p12
+*.mobileprovision
+*.key
+.personal-gps-token
+__pycache__/
+*.pyc
+.DS_Store
